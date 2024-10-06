@@ -1,0 +1,10 @@
+[package]
+name = "block-index"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.63.0"
+
+[dependencies]
+bitcoin = "0.32.3"
+bdk_chain = { path = "../bdk/crates/chain", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
