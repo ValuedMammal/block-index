@@ -1,6 +1,8 @@
 //! Block index
 
 use alloc::vec::Vec;
+use bitcoin::block::Header;
+use bitcoin::hashes::Hash;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -17,26 +19,45 @@ use crate::ll;
 type Height = u32;
 
 /// Block graph
-pub type BlockGraph = BTreeMap<Height, Vec<Node>>;
+pub type BlockGraph<T> = BTreeMap<Height, Vec<Node<T>>>;
+
+/// Block header and height
+pub type IndexedHeader = (Height, Header);
+
+/// Defines the behavior of a node in the graph
+pub trait BlockNode: fmt::Debug + Copy + PartialEq + Eq + PartialOrd + Ord {
+    /// block id
+    fn block_id(&self) -> BlockId;
+}
+
+impl BlockNode for (Height, Header) {
+    fn block_id(&self) -> BlockId {
+        BlockId {
+            height: self.0,
+            hash: self.1.block_hash(),
+        }
+    }
+}
+
+impl BlockNode for BlockId {
+    fn block_id(&self) -> BlockId {
+        *self
+    }
+}
 
 /// A node in the block graph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Node {
-    /// hash
-    hash: BlockHash,
-    /// conn
+pub struct Node<T> {
+    /// the inner type
+    inner: T,
+    /// connected to
     conn: BlockId,
 }
 
-impl Node {
-    /// New from blockhash and node id of block connected to
-    pub fn new(hash: BlockHash, conn: BlockId) -> Self {
-        Self { hash, conn }
-    }
-
-    /// Current block
-    pub fn hash(&self) -> BlockHash {
-        self.hash
+impl<T: BlockNode> Node<T> {
+    /// Construct a new node
+    pub fn new(inner: T, conn: BlockId) -> Self {
+        Self { inner, conn }
     }
 
     /// Connected to
@@ -45,23 +66,41 @@ impl Node {
     }
 }
 
+impl<T> core::ops::Deref for Node<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 /// Block index
 #[derive(Debug, Clone, PartialEq)]
-pub struct BlockIndex {
+pub struct BlockIndex<T: BlockNode> {
     /// root
-    pub root: BlockHash,
+    pub root: T,
     /// graph
-    pub graph: BlockGraph,
+    pub graph: BlockGraph<T>,
     /// index
     pub index: Vec<NodeId>,
     /// chain tip
-    pub tip: ll::List<BlockId>,
+    pub tip: ll::List<T>,
 }
 
-impl BlockIndex {
+impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
     /// New
-    pub fn new(genesis_hash: BlockHash) -> Self {
-        Self::from_genesis_graph(genesis_hash, BlockGraph::new())
+    pub fn new(root: T, graph: BlockGraph<T>) -> Self {
+        // TODO: error if root block height != 0
+        let mut idx = Self {
+            root,
+            graph,
+            index: vec![],
+            tip: ll::List::new(),
+        };
+
+        idx.reindex();
+
+        idx
     }
 
     /// Create new from a list of blocks.
@@ -72,45 +111,58 @@ impl BlockIndex {
     /// # Errors
     ///
     /// - If `blocks` does not contain the genesis block
-    pub fn from_blocks(
-        blocks: impl IntoIterator<Item = BlockId>,
+    pub fn from_block_ids(
+        blocks: impl IntoIterator<Item = T>,
     ) -> Result<Self, MissingGenesisError> {
         let mut graph = BlockGraph::new();
         let mut blocks = blocks.into_iter();
-        let genesis = blocks.next().ok_or(MissingGenesisError::default())?;
-        if genesis.height != 0 {
+        let root = blocks.next().ok_or(MissingGenesisError::default())?;
+        if root.block_id().height != 0 {
             return Err(MissingGenesisError::default());
         }
-        let mut conn = genesis;
+        let mut conn = root;
 
         for block in blocks {
-            let height = block.height;
-            let hash = block.hash;
-            graph.entry(height).or_default().push(Node::new(hash, conn));
+            let height = block.block_id().height;
+            graph
+                .entry(height)
+                .or_default()
+                .push(Node::new(block, conn.block_id()));
             conn = block;
         }
 
-        Ok(Self::from_genesis_graph(genesis.hash, graph))
+        Ok(Self::new(root, graph))
     }
 
     /// Get the graph nodes at a given height
     ///
     /// Note there are no nodes at height 0.
-    fn nodes(&self, height: Height) -> Option<Vec<Node>> {
+    fn nodes(&self, height: Height) -> Option<Vec<Node<T>>> {
         self.graph.get(&height).cloned()
     }
 
-    /// Get the genesis block
+    /// Get the genesis node
+    fn genesis_node(&self) -> Node<T> {
+        Node {
+            inner: self.root,
+            conn: BlockId {
+                height: 0,
+                hash: BlockHash::all_zeros(),
+            },
+        }
+    }
+
+    /// Genesis block
     pub fn genesis_block(&self) -> BlockId {
         BlockId {
             height: 0,
-            hash: self.root,
+            hash: self.genesis_hash(),
         }
     }
 
     /// Get the genesis hash
     pub fn genesis_hash(&self) -> BlockHash {
-        self.root
+        self.root.block_id().hash
     }
 
     /// Construct the canonical chain from the current graph.
@@ -170,7 +222,7 @@ impl BlockIndex {
             assert_eq!(node.connected_to(), conn);
             let cur = BlockId {
                 height: id.height(),
-                hash: node.hash(),
+                hash: node.block_id().hash,
             };
             conn = cur;
         }
@@ -179,21 +231,17 @@ impl BlockIndex {
         let tip = self.search(&terminal_node).expect("block must exist");
         assert_eq!(
             self.get_chain_tip().unwrap(),
-            tip,
+            tip.block_id(),
             "index out of sync with chain"
         );
     }
 
-    /// Search for a block by node id
-    fn search(&self, id: &NodeId) -> Option<BlockId> {
+    /// Search for a node by id
+    fn search(&self, id: &NodeId) -> Option<Node<T>> {
         if let NodeId::GENESIS = *id {
-            return Some(self.genesis_block());
+            return Some(self.genesis_node());
         }
-        let node = self.graph.search(id)?;
-        Some(BlockId {
-            height: id.height(),
-            hash: node.hash,
-        })
+        self.graph.search(id)
     }
 
     /// Construct chain tip iterator from the canonical index
@@ -202,10 +250,10 @@ impl BlockIndex {
 
         // we push onto the list in ascending height order such that the chain
         // tip becomes the head of the list
-        self.tip.push(self.genesis_block());
+        self.tip.push(self.root);
         for id in &self.index {
-            let block = self.search(id).expect("block must exist in graph");
-            self.tip.push(block);
+            let node = self.search(id).expect("block must exist in graph");
+            self.tip.push(node.inner);
         }
     }
 
@@ -213,31 +261,19 @@ impl BlockIndex {
     ///
     /// The returned [`ListIter`](ll::ListIter) is represented internally as a singly
     /// linked list.
-    pub fn iter(&self) -> ll::ListIter<BlockId> {
+    pub fn iter(&self) -> ll::ListIter<T> {
         self.tip.iter()
-    }
-
-    /// Construct block index from genesis hash and block graph.
-    pub fn from_genesis_graph(root: BlockHash, graph: BlockGraph) -> Self {
-        let mut chain = Self {
-            root,
-            graph,
-            index: vec![],
-            tip: ll::List::new(),
-        };
-        chain.reindex();
-        chain
     }
 
     /// Return true if block is found in the graph regardless
     /// of whether it exists in the canonical chain
-    pub fn scan_graph(&self, block: BlockId) -> bool {
+    pub fn scan(&self, block: BlockId) -> bool {
         if block == self.genesis_block() {
             return true;
         }
         let nodes = self.nodes(block.height).unwrap_or_default();
         for node in nodes {
-            if node.hash == block.hash {
+            if node.block_id().hash == block.hash {
                 return true;
             }
         }
@@ -245,18 +281,21 @@ impl BlockIndex {
     }
 
     /// Initial changeset
-    pub fn initial_changeset(&self) -> ChangeSet {
+    pub fn initial_changeset(&self) -> ChangeSet<T> {
         let mut blocks = vec![];
-        for (height, nodes) in &self.graph {
+
+        // allow the genesis block to connect to itself
+        let root = self.genesis_node();
+        blocks.push((root.inner, root.conn));
+
+        // collect graph nodes
+        for nodes in self.graph.values() {
             for node in nodes {
-                let block = BlockId {
-                    height: *height,
-                    hash: node.hash,
-                };
                 let conn = node.connected_to();
-                blocks.push((block, conn));
+                blocks.push((node.inner, conn));
             }
         }
+
         ChangeSet { blocks }
     }
 
@@ -267,14 +306,14 @@ impl BlockIndex {
     /// was successfully extended. This will be true if the given block connects
     /// to the current chain tip and false otherwise. Note that adding a block
     /// to the chain is infallible regardless of what it claims to connect to.
-    pub fn connect(&mut self, block: BlockId, conn: BlockId) -> (bool, ChangeSet) {
+    pub fn connect(&mut self, block: T, conn: BlockId) -> (bool, ChangeSet<T>) {
         let mut changeset = ChangeSet::default();
         let mut extended = false;
-        let height = block.height;
+        let height = block.block_id().height;
 
         let nodes = self.graph.entry(height).or_default();
         let nodes_len = nodes.len();
-        let node = Node::new(block.hash, conn);
+        let node = Node::new(block, conn);
         if nodes.contains(&node) {
             return (extended, changeset);
         }
@@ -296,7 +335,7 @@ impl BlockIndex {
     ///
     /// This will find the set difference between self and the given `graph` and return it
     /// as a [`ChangeSet`]. Errors if no point of connection exists.
-    pub fn merge_chains(&self, other: &BlockGraph) -> Result<ChangeSet, MergeChainsError> {
+    pub fn merge_chains(&self, other: &BlockGraph<T>) -> Result<ChangeSet<T>, MergeChainsError<T>> {
         let mut changeset = ChangeSet::default();
 
         // check is valid graph
@@ -307,20 +346,20 @@ impl BlockIndex {
         // check point of connection
         let root_id = other.root();
         let node = other.search(&root_id).expect("root must exist");
-        if !self.scan_graph(node.connected_to()) {
+        if !self.scan(node.connected_to()) {
             return Err(MergeChainsError::DoesNotConnect { root: node });
         }
 
         // for each node in the given graph, if the block does not exist in `self`
         // we add it to the changeset
         for (&height, nodes) in other.iter() {
-            for node in nodes {
+            for &node in nodes {
                 let block = BlockId {
                     height,
-                    hash: node.hash,
+                    hash: node.block_id().hash,
                 };
-                if !self.scan_graph(block) {
-                    changeset.blocks.push((block, node.connected_to()));
+                if !self.scan(block) {
+                    changeset.blocks.push((node.inner, node.connected_to()));
                 }
             }
         }
@@ -329,7 +368,7 @@ impl BlockIndex {
     }
 
     /// Apply changeset
-    pub fn apply_changeset(&mut self, changeset: &ChangeSet) {
+    pub fn apply_changeset(&mut self, changeset: &ChangeSet<T>) {
         if changeset.blocks.is_empty() {
             return;
         }
@@ -352,7 +391,7 @@ impl BlockIndex {
     }
 
     /// Convenience for calling merge_chains and then applying the resulting changeset
-    pub fn apply_update(&mut self, graph: BlockGraph) -> Result<(), MergeChainsError> {
+    pub fn apply_update(&mut self, graph: BlockGraph<T>) -> Result<(), MergeChainsError<T>> {
         let changeset = self.merge_chains(&graph)?;
         self.apply_changeset(&changeset);
         Ok(())
@@ -360,12 +399,14 @@ impl BlockIndex {
 
     /// Get a block from the canonical chain if it exists at height.
     pub fn get(&self, height: Height) -> Option<BlockId> {
-        self.iter().find(|b| b.height == height)
+        self.iter()
+            .map(|n| n.block_id())
+            .find(|b| b.height == height)
     }
 
     /// Get the tip
-    pub fn tip(&self) -> BlockId {
-        self.iter().next().expect("chain must have tip")
+    pub fn tip(&self) -> T {
+        self.iter().next().expect("must have chain tip")
     }
 
     /// Iter checkpoints. Note: this is a temporary solution to provide interop with bdk_wallet
@@ -382,33 +423,40 @@ impl BlockIndex {
 
     /// Constructor from checkpoint. Note: this is a workaround that allows making
     /// a block graph from a checkpoint
-    pub fn from_checkpoint(cp: CheckPoint) -> Self {
+    pub fn from_checkpoint(cp: CheckPoint) -> BlockIndex<BlockId> {
         let mut blocks = vec![];
         for cp in cp.iter() {
-            if cp.prev().is_none() {
-                break;
-            }
             let block = cp.block_id();
-            let conn = cp.prev().unwrap().block_id();
+            let conn = cp.prev().unwrap_or(cp).block_id();
             blocks.push((block, conn));
         }
         blocks.reverse();
         let changeset = ChangeSet { blocks };
-        Self::from_changeset(changeset)
+        BlockIndex::<BlockId>::from_changeset(changeset)
     }
 
     /// Get a reference to the block graph
-    pub fn graph(&self) -> &BlockGraph {
+    pub fn graph(&self) -> &BlockGraph<T> {
         &self.graph
     }
 
-    /// Constructor from changeset. Panics if changeset is empty.
-    pub fn from_changeset(changeset: ChangeSet) -> Self {
-        let (_, root) = changeset
+    /// Constructor from changeset. Panics if root not present in changeset.
+    pub fn from_changeset(changeset: ChangeSet<T>) -> Self {
+        let &(root, _) = changeset
             .blocks
-            .first()
-            .expect("changeset must not be empty");
-        let mut chain = Self::new(root.hash);
+            .iter()
+            .find(|(n, _)| n.block_id().height == 0)
+            .expect("changeset must include root");
+
+        let changeset = ChangeSet {
+            blocks: changeset
+                .blocks
+                .into_iter()
+                .filter(|(n, _)| n.block_id().height > 0)
+                .collect(),
+        };
+
+        let mut chain = Self::new(root, BlockGraph::default());
         chain.apply_changeset(&changeset);
         chain
     }
@@ -418,7 +466,7 @@ impl BlockIndex {
 ///
 /// The root is the last node in the graph whose connected_to block is not found
 /// in this graph.
-fn get_path(graph: &BlockGraph) -> BTreeSet<NodeId> {
+fn get_path<T: BlockNode>(graph: &BlockGraph<T>) -> BTreeSet<NodeId> {
     let mut path = BTreeSet::new();
     if graph.is_empty() {
         return path;
@@ -442,11 +490,7 @@ fn get_path(graph: &BlockGraph) -> BTreeSet<NodeId> {
     // for the next level of the graph.
     for (&height, nodes) in graph.iter().rev() {
         for (index, node) in nodes.iter().enumerate() {
-            let block = BlockId {
-                height,
-                hash: node.hash,
-            };
-            if block == connected_to {
+            if node.block_id() == connected_to {
                 path.insert(NodeId::new(height, index));
                 connected_to = node.connected_to();
                 break;
@@ -459,7 +503,7 @@ fn get_path(graph: &BlockGraph) -> BTreeSet<NodeId> {
 
 /// Returns true if this block graph represents a valid chain. This is used to check
 /// whether two chains can be merged cleanly
-fn is_valid_chain(graph: &BlockGraph) -> bool {
+fn is_valid_chain<T: BlockNode>(graph: &BlockGraph<T>) -> bool {
     // must not be empty
     if graph.is_empty() {
         return false;
@@ -489,17 +533,17 @@ impl std::error::Error for MissingGenesisError {}
 
 /// Error while trying to merge two chains
 #[derive(Debug)]
-pub enum MergeChainsError {
+pub enum MergeChainsError<T> {
     /// failed to connect to parent graph
     DoesNotConnect {
         /// The node that didn't connect
-        root: Node,
+        root: Node<T>,
     },
     /// invalid chain
     InvalidChain,
 }
 
-impl fmt::Display for MergeChainsError {
+impl<T: fmt::Debug> fmt::Display for MergeChainsError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DoesNotConnect { root } => {
@@ -510,7 +554,7 @@ impl fmt::Display for MergeChainsError {
     }
 }
 
-impl std::error::Error for MergeChainsError {}
+impl<T: fmt::Debug + fmt::Display> std::error::Error for MergeChainsError<T> {}
 
 /// Information for looking up a node in the block graph
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -537,13 +581,26 @@ impl NodeId {
 }
 
 /// Change set
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ChangeSet {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ChangeSet<T> {
     /// blocks
-    pub blocks: Vec<(BlockId, BlockId)>,
+    pub blocks: Vec<(T, BlockId)>,
 }
 
-impl Merge for ChangeSet {
+impl<T> ChangeSet<T> {
+    /// New
+    fn new() -> Self {
+        Self { blocks: vec![] }
+    }
+}
+
+impl<T> Default for ChangeSet<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Merge for ChangeSet<T> {
     fn merge(&mut self, other: Self) {
         self.blocks.extend(other.blocks);
     }
@@ -553,11 +610,15 @@ impl Merge for ChangeSet {
     }
 }
 
-impl ChainOracle for BlockIndex {
+impl<T: BlockNode> ChainOracle for BlockIndex<T> {
     type Error = core::convert::Infallible;
 
     fn get_chain_tip(&self) -> Result<BlockId, Self::Error> {
-        Ok(self.iter().next().expect("chain must not be empty"))
+        Ok(self
+            .iter()
+            .next()
+            .expect("chain must not be empty")
+            .block_id())
     }
 
     fn is_block_in_chain(
@@ -576,7 +637,7 @@ impl ChainOracle for BlockIndex {
         }
 
         for cur in self.iter() {
-            if cur == block {
+            if cur.block_id() == block {
                 return Ok(Some(true));
             }
         }
@@ -586,21 +647,21 @@ impl ChainOracle for BlockIndex {
 }
 
 /// Trait
-trait Tree {
+trait Tree<T> {
     /// The first element in the canonical index
     fn root(&self) -> NodeId;
 
     /// Search the tree for a block by id
-    fn search(&self, id: &NodeId) -> Option<Node>;
+    fn search(&self, id: &NodeId) -> Option<Node<T>>;
 }
 
-impl Tree for BlockGraph {
+impl<T: BlockNode> Tree<T> for BlockGraph<T> {
     fn root(&self) -> NodeId {
         let index = get_path(self);
         index.iter().next().cloned().unwrap_or_default()
     }
 
-    fn search(&self, id: &NodeId) -> Option<Node> {
+    fn search(&self, id: &NodeId) -> Option<Node<T>> {
         let nodes = self.get(&id.height())?;
         nodes.get(id.index()).copied()
     }
@@ -626,15 +687,16 @@ mod test {
             }
         };
     }
+    #[allow(unused_macros)]
     macro_rules! hash {
         ($h:literal) => {
             bitcoin::hashes::Hash::hash($h.as_bytes())
         };
     }
     macro_rules! node {
-        ( $block_id:expr, $conn:expr ) => {{
+        ( $inner:expr, $conn:expr ) => {{
             Node {
-                hash: $block_id.hash,
+                inner: $inner,
                 conn: $conn,
             }
         }};
@@ -654,9 +716,9 @@ mod test {
     }
 
     /// Returns a new `BlockIndex` with blocks from [`test_blocks`]
-    fn test_chain_default() -> BlockIndex {
+    fn test_chain_default() -> BlockIndex<BlockId> {
         let blocks = test_blocks();
-        BlockIndex::from_blocks(blocks).unwrap()
+        BlockIndex::from_block_ids(blocks).unwrap()
     }
 
     #[test]
@@ -671,7 +733,7 @@ mod test {
             graph.insert(h, vec![node!(block, conn)]);
             conn = block;
         }
-        let chain = BlockIndex::from_genesis_graph(genesis.hash, graph);
+        let chain = BlockIndex::new(genesis, graph);
         assert_eq!(chain.get_chain_tip().unwrap().height, end);
         assert_eq!(chain.iter().count(), (end + 1) as usize);
     }
@@ -731,7 +793,7 @@ mod test {
         let block3 = blocks[3];
         let block3_prime = block!(3, "C'");
 
-        let mut tree = BTreeMap::<Height, Vec<Node>>::new();
+        let mut tree = BTreeMap::<Height, Vec<Node<BlockId>>>::new();
         tree.insert(1, vec![node!(block1, block0)]);
         tree.insert(2, vec![node!(block2, block1)]);
         tree.insert(
@@ -742,7 +804,7 @@ mod test {
                 node!(block3_prime, block2),
             ],
         );
-        let chain = BlockIndex::from_genesis_graph(hash!("G"), tree);
+        let chain = BlockIndex::new(block!(0, "G"), tree);
 
         // expect
         let exp = vec![block2, block1, block0];
@@ -757,14 +819,14 @@ mod test {
         let block4 = block!(4, "C");
         let block8 = block!(8, "D");
 
-        let tree: BTreeMap<Height, Vec<Node>> = [
+        let tree: BTreeMap<Height, Vec<Node<BlockId>>> = [
             (1, vec![node!(block1, block0)]),
             (2, vec![node!(block2, block1)]),
             (4, vec![node!(block4, block2)]),
             (8, vec![node!(block8, block4)]),
         ]
         .into();
-        let chain = BlockIndex::from_genesis_graph(hash!("G"), tree);
+        let chain = BlockIndex::new(block!(0, "G"), tree);
         let it = chain.iter();
         assert_eq!(it.count(), 5);
     }
@@ -777,9 +839,9 @@ mod test {
         let block2 = blocks[2];
         let block3 = blocks[3];
 
-        let gen = hash!("G");
+        let gen = block!(0, "G");
         // test new BlockIndex with an empty tree
-        let chain = BlockIndex::new(gen);
+        let chain = BlockIndex::new(gen, BlockGraph::new());
         assert!(
             chain.index.is_empty(),
             "index should not include genesis node id"
@@ -791,7 +853,7 @@ mod test {
         graph.insert(2, vec![node!(block2, block1)]);
         graph.insert(3, vec![node!(block3, block2)]);
 
-        let chain = BlockIndex::from_genesis_graph(gen, graph);
+        let chain = BlockIndex::new(gen, graph);
 
         // calling `iter` should yield the expected blocks
         let mut exp = vec![];
@@ -813,7 +875,7 @@ mod test {
             block!(2, "B'"),
             block!(3, "C'"),
         ];
-        let other = BlockIndex::from_blocks(other_blocks).unwrap();
+        let other = BlockIndex::from_block_ids(other_blocks).unwrap();
         let cs = chain.merge_chains(&other.graph).unwrap();
         assert_eq!(cs.blocks.len(), 3);
 
@@ -843,9 +905,9 @@ mod test {
         let chain = test_chain_default(); // 0, 1, 2, 3
 
         let mut tree = BlockGraph::new();
-        let node5 = Node::new(hash!("E"), block!(4, "D"));
+        let node5 = Node::new(block!(5, "E"), block!(4, "D"));
         tree.insert(5, vec![node5]);
-        let node6 = Node::new(hash!("F"), block!(5, "E"));
+        let node6 = Node::new(block!(6, "F"), block!(5, "E"));
         tree.insert(6, vec![node6]);
         let err = chain.merge_chains(&tree).unwrap_err();
         assert!(matches!(err, MergeChainsError::DoesNotConnect { root } if root == node5));
@@ -853,7 +915,7 @@ mod test {
 
     #[test]
     fn test_connect() {
-        let mut chain = BlockIndex::new(hash!("G"));
+        let mut chain = BlockIndex::new(block!(0, "G"), BlockGraph::new());
         let block1 = block!(1, "A");
         let block2 = block!(2, "B");
         let block3 = block!(3, "C");
@@ -899,7 +961,7 @@ mod test {
         assert!(is_valid_chain(&tree));
         chain.apply_changeset(&changeset);
         let id3 = chain.index[2];
-        assert_eq!(chain.search(&id3), Some(block3_prime));
+        assert_eq!(chain.search(&id3).unwrap().block_id(), block3_prime);
     }
 
     #[test]
@@ -949,7 +1011,7 @@ mod test {
             block!(2, "B"),
             block!(3, "C"),
         ];
-        let chain = BlockIndex::from_blocks(blocks).unwrap();
+        let chain = BlockIndex::from_block_ids(blocks).unwrap();
         assert_eq!(chain, test_chain_default());
         assert!(is_valid_chain(&chain.graph));
         assert_eq!(chain.get_chain_tip().unwrap(), block!(3, "C"));
@@ -958,7 +1020,12 @@ mod test {
     #[test]
     fn test_from_changeset() {
         let chain = test_chain_default();
+        let null_block = BlockId {
+            height: 0,
+            hash: BlockHash::all_zeros(),
+        };
         let blocks = vec![
+            (block!(0, "G"), null_block),
             (block!(1, "A"), block!(0, "G")),
             (block!(2, "B"), block!(1, "A")),
             (block!(3, "C"), block!(2, "B")),
@@ -977,6 +1044,46 @@ mod test {
 
         // let default_chain = test_chain_default();
         // dbg!(default_chain.graph());
-        assert_eq!(BlockIndex::from_checkpoint(cp), test_chain_default());
+        assert_eq!(
+            BlockIndex::<BlockId>::from_checkpoint(cp),
+            test_chain_default()
+        );
+    }
+
+    #[test]
+    #[ignore = "in develop"]
+    fn header_test() {
+        use bitcoin::hex::FromHex;
+
+        let data_0 = <Vec<u8> as FromHex>::from_hex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae18")
+            .unwrap();
+        let data_1 = <Vec<u8> as FromHex>::from_hex("0100000043497fd7f826957108f4a30fd9cec3aeba79972084e90ead01ea330900000000bac8b0fa927c0ac8234287e33c5f74d38d354820e24756ad709d7038fc5f31f020e7494dffff001d03e4b672")
+            .unwrap();
+        let data_2 = <Vec<u8> as FromHex>::from_hex("0100000006128e87be8b1b4dea47a7247d5528d2702c96826c7a648497e773b800000000e241352e3bec0a95a6217e10c3abb54adfa05abb12c126695595580fb92e222032e7494dffff001d00d23534")
+            .unwrap();
+        let header_0: Header = bitcoin::consensus::deserialize(&data_0).unwrap();
+        let header_1: Header = bitcoin::consensus::deserialize(&data_1).unwrap();
+        let header_2: Header = bitcoin::consensus::deserialize(&data_2).unwrap();
+
+        // dbg!(header);
+        let mut idx = BlockIndex::<IndexedHeader>::new((0, header_0), BlockGraph::new());
+        // dbg!(&idx);
+
+        idx.connect(
+            (1, header_1),
+            BlockId {
+                height: 0,
+                hash: header_1.prev_blockhash,
+            },
+        );
+        idx.connect(
+            (2, header_2),
+            BlockId {
+                height: 1,
+                hash: header_2.prev_blockhash,
+            },
+        );
+
+        dbg!(&idx);
     }
 }
