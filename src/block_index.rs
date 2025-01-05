@@ -108,9 +108,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
     /// # Errors
     ///
     /// - If `blocks` does not contain the genesis block
-    pub fn from_block_ids(
-        blocks: impl IntoIterator<Item = T>,
-    ) -> Result<Self, MissingGenesisError> {
+    pub fn from_blocks(blocks: impl IntoIterator<Item = T>) -> Result<Self, MissingGenesisError> {
         let mut graph = BlockGraph::new();
         let mut blocks = blocks.into_iter();
         let root = blocks.next().ok_or(MissingGenesisError::default())?;
@@ -718,7 +716,7 @@ mod test {
     /// Returns a new `BlockIndex` with blocks from [`test_blocks`]
     fn test_chain_default() -> BlockIndex<BlockId> {
         let blocks = test_blocks();
-        BlockIndex::from_block_ids(blocks).unwrap()
+        BlockIndex::from_blocks(blocks).unwrap()
     }
 
     #[test]
@@ -875,7 +873,7 @@ mod test {
             block!(2, "B'"),
             block!(3, "C'"),
         ];
-        let other = BlockIndex::from_block_ids(other_blocks).unwrap();
+        let other = BlockIndex::from_blocks(other_blocks).unwrap();
         let cs = chain.merge_chains(&other.graph).unwrap();
         assert_eq!(cs.blocks.len(), 3);
 
@@ -1011,7 +1009,7 @@ mod test {
             block!(2, "B"),
             block!(3, "C"),
         ];
-        let chain = BlockIndex::from_block_ids(blocks).unwrap();
+        let chain = BlockIndex::from_blocks(blocks).unwrap();
         assert_eq!(chain, test_chain_default());
         assert!(is_valid_chain(&chain.graph));
         assert_eq!(chain.get_chain_tip().unwrap(), block!(3, "C"));
