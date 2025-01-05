@@ -1,19 +1,16 @@
 //! Block index
 
 use alloc::vec::Vec;
-use bitcoin::block::Header;
-use bitcoin::hashes::Hash;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
-use bdk_chain::collections::{BTreeMap, BTreeSet};
-use bdk_chain::BlockId;
-use bdk_chain::ChainOracle;
-use bdk_chain::CheckPoint;
-use bdk_chain::Merge;
-use bitcoin::BlockHash;
+use bdk_chain::{
+    collections::{BTreeMap, BTreeSet},
+    BlockId, ChainOracle, CheckPoint, Merge,
+};
+use bitcoin::{block::Header, hashes::Hash, BlockHash};
 
-use crate::ll;
+use crate::list::{List, ListIter};
 
 /// Height
 type Height = u32;
@@ -84,7 +81,7 @@ pub struct BlockIndex<T: BlockNode> {
     /// index
     pub index: Vec<NodeId>,
     /// chain tip
-    pub tip: ll::List<T>,
+    pub tip: List<T>,
 }
 
 impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
@@ -95,7 +92,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
             root,
             graph,
             index: vec![],
-            tip: ll::List::new(),
+            tip: List::new(),
         };
 
         idx.reindex();
@@ -246,7 +243,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
 
     /// Construct chain tip iterator from the canonical index
     fn create_tip(&mut self) {
-        self.tip = ll::List::new();
+        self.tip = List::new();
 
         // we push onto the list in ascending height order such that the chain
         // tip becomes the head of the list
@@ -261,7 +258,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
     ///
     /// The returned [`ListIter`](ll::ListIter) is represented internally as a singly
     /// linked list.
-    pub fn iter(&self) -> ll::ListIter<T> {
+    pub fn iter(&self) -> ListIter<T> {
         self.tip.iter()
     }
 

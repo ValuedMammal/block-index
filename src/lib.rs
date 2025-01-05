@@ -9,6 +9,6 @@ extern crate alloc;
 extern crate std;
 
 mod block_index;
-pub mod ll;
+pub mod list;
 
 pub use block_index::*;
