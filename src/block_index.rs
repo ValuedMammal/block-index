@@ -18,27 +18,42 @@ type Height = u32;
 /// Block graph
 pub type BlockGraph<T> = BTreeMap<Height, Vec<Node<T>>>;
 
-/// Block header and height
-pub type IndexedHeader = (Height, Header);
-
 /// Defines the behavior of a node in the graph
 pub trait BlockNode: Ord + Clone {
     /// block id
     fn block_id(&self) -> BlockId;
 }
 
-impl BlockNode for (Height, Header) {
+impl BlockNode for BlockId {
     fn block_id(&self) -> BlockId {
-        BlockId {
-            height: self.0,
-            hash: self.1.block_hash(),
+        *self
+    }
+}
+
+/// Block header id
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BlockHeaderId {
+    /// height
+    height: u32,
+    /// header
+    header: Header,
+}
+
+impl From<(Height, Header)> for BlockHeaderId {
+    fn from(value: (Height, Header)) -> Self {
+        Self {
+            height: value.0,
+            header: value.1,
         }
     }
 }
 
-impl BlockNode for BlockId {
+impl BlockNode for BlockHeaderId {
     fn block_id(&self) -> BlockId {
-        *self
+        BlockId {
+            height: self.height,
+            hash: self.header.block_hash(),
+        }
     }
 }
 
@@ -1047,9 +1062,7 @@ mod test {
     }
 
     #[test]
-    #[allow(unused)]
-    #[ignore = "in develop"]
-    fn header_test() {
+    fn block_header_index() {
         use bitcoin::hex::FromHex;
 
         let data_0 = <Vec<u8> as FromHex>::from_hex("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff001d1aa4ae18")
@@ -1058,28 +1071,26 @@ mod test {
             .unwrap();
         let data_2 = <Vec<u8> as FromHex>::from_hex("0100000006128e87be8b1b4dea47a7247d5528d2702c96826c7a648497e773b800000000e241352e3bec0a95a6217e10c3abb54adfa05abb12c126695595580fb92e222032e7494dffff001d00d23534")
             .unwrap();
-        let header_0: Header = bitcoin::consensus::deserialize(&data_0).unwrap();
-        let header_1: Header = bitcoin::consensus::deserialize(&data_1).unwrap();
-        let header_2: Header = bitcoin::consensus::deserialize(&data_2).unwrap();
+        let headers = [
+            bitcoin::consensus::deserialize(&data_0).unwrap(),
+            bitcoin::consensus::deserialize(&data_1).unwrap(),
+            bitcoin::consensus::deserialize(&data_2).unwrap(),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(h, header)| BlockHeaderId {
+            height: h as u32,
+            header,
+        })
+        .collect::<Vec<_>>();
 
-        let mut idx = BlockIndex::<IndexedHeader>::new((0, header_0), BlockGraph::new());
+        let blk_idx = BlockIndex::<BlockHeaderId>::from_blocks(headers.clone()).unwrap();
+
         // dbg!(&idx);
 
-        idx.connect(
-            (1, header_1),
-            BlockId {
-                height: 0,
-                hash: header_1.prev_blockhash,
-            },
-        );
-        idx.connect(
-            (2, header_2),
-            BlockId {
-                height: 1,
-                hash: header_2.prev_blockhash,
-            },
-        );
-
-        dbg!(&idx);
+        assert_eq!(blk_idx.genesis_node().inner, headers[0]);
+        assert_eq!(blk_idx.index, vec![NodeId((1, 0)), NodeId((2, 0))]);
+        assert_eq!(blk_idx.iter().count(), 3);
+        assert_eq!(blk_idx.tip().height, 2);
     }
 }
