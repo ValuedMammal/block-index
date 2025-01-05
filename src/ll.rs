@@ -10,11 +10,11 @@ struct Node<T> {
 
 /// Linked list
 #[derive(Debug, Clone, Default)]
-pub struct List<T: Copy> {
+pub struct List<T: Clone> {
     head: Option<Arc<Node<T>>>,
 }
 
-impl<T: Copy> List<T> {
+impl<T: Clone> List<T> {
     /// New
     pub fn new() -> Self {
         List { head: None }
@@ -32,8 +32,8 @@ impl<T: Copy> List<T> {
     /// Pop
     pub fn pop(&mut self) -> Option<T> {
         self.head.take().map(|node| {
-            self.head = node.next.clone();
-            node.value
+            self.head.clone_from(&node.next);
+            node.value.clone()
         })
     }
 
@@ -43,7 +43,7 @@ impl<T: Copy> List<T> {
     }
 }
 
-impl<T: Copy + Eq> PartialEq for List<T> {
+impl<T: Clone + Eq> PartialEq for List<T> {
     fn eq(&self, other: &Self) -> bool {
         self.into_iter().eq(other)
     }
@@ -59,13 +59,13 @@ impl<T: Clone> Iterator for ListIter<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.current.take().map(|node| {
-            self.current = node.next.clone();
+            self.current.clone_from(&node.next);
             node.value.clone()
         })
     }
 }
 
-impl<T: Copy> IntoIterator for &List<T> {
+impl<T: Clone> IntoIterator for &List<T> {
     type Item = T;
     type IntoIter = ListIter<T>;
 
@@ -76,7 +76,7 @@ impl<T: Copy> IntoIterator for &List<T> {
     }
 }
 
-impl<T: Copy> IntoIterator for List<T> {
+impl<T: Clone> IntoIterator for List<T> {
     type Item = T;
     type IntoIter = ListIter<T>;
 
@@ -87,7 +87,7 @@ impl<T: Copy> IntoIterator for List<T> {
     }
 }
 
-impl<T: Copy> Drop for List<T> {
+impl<T: Clone> Drop for List<T> {
     fn drop(&mut self) {
         while self.pop().is_some() {}
     }

@@ -25,7 +25,7 @@ pub type BlockGraph<T> = BTreeMap<Height, Vec<Node<T>>>;
 pub type IndexedHeader = (Height, Header);
 
 /// Defines the behavior of a node in the graph
-pub trait BlockNode: fmt::Debug + Copy + PartialEq + Eq + PartialOrd + Ord {
+pub trait BlockNode: Ord + Clone {
     /// block id
     fn block_id(&self) -> BlockId;
 }
@@ -120,14 +120,14 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
         if root.block_id().height != 0 {
             return Err(MissingGenesisError::default());
         }
-        let mut conn = root;
+        let mut conn = root.clone();
 
         for block in blocks {
             let height = block.block_id().height;
             graph
                 .entry(height)
                 .or_default()
-                .push(Node::new(block, conn.block_id()));
+                .push(Node::new(block.clone(), conn.block_id()));
             conn = block;
         }
 
@@ -144,7 +144,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
     /// Get the genesis node
     fn genesis_node(&self) -> Node<T> {
         Node {
-            inner: self.root,
+            inner: self.root.clone(),
             conn: BlockId {
                 height: 0,
                 hash: BlockHash::all_zeros(),
@@ -227,7 +227,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
             conn = cur;
         }
 
-        let terminal_node = self.index.iter().last().cloned().unwrap_or_default();
+        let terminal_node = self.index.iter().last().copied().unwrap_or_default();
         let tip = self.search(&terminal_node).expect("block must exist");
         assert_eq!(
             self.get_chain_tip().unwrap(),
@@ -250,7 +250,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
 
         // we push onto the list in ascending height order such that the chain
         // tip becomes the head of the list
-        self.tip.push(self.root);
+        self.tip.push(self.root.clone());
         for id in &self.index {
             let node = self.search(id).expect("block must exist in graph");
             self.tip.push(node.inner);
@@ -292,7 +292,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
         for nodes in self.graph.values() {
             for node in nodes {
                 let conn = node.connected_to();
-                blocks.push((node.inner, conn));
+                blocks.push((node.inner.clone(), conn));
             }
         }
 
@@ -313,12 +313,12 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
 
         let nodes = self.graph.entry(height).or_default();
         let nodes_len = nodes.len();
-        let node = Node::new(block, conn);
+        let node = Node::new(block.clone(), conn);
         if nodes.contains(&node) {
             return (extended, changeset);
         }
         nodes.push(node);
-        changeset.blocks.push((block, conn));
+        changeset.blocks.push((block.clone(), conn));
         let cur_tip = self.get_chain_tip().expect("must have chain tip");
         if conn == cur_tip {
             // we're extending the current tip with this block, so it's safe
@@ -352,14 +352,16 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
 
         // for each node in the given graph, if the block does not exist in `self`
         // we add it to the changeset
-        for (&height, nodes) in other.iter() {
-            for &node in nodes {
+        for (&height, nodes) in other {
+            for node in nodes {
                 let block = BlockId {
                     height,
                     hash: node.block_id().hash,
                 };
                 if !self.scan(block) {
-                    changeset.blocks.push((node.inner, node.connected_to()));
+                    changeset
+                        .blocks
+                        .push((node.inner.clone(), node.connected_to()));
                 }
             }
         }
@@ -376,8 +378,8 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
         let mut chain_extended = true;
 
         // connect blocks
-        for &(block, conn) in &changeset.blocks {
-            let (extended, _) = self.connect(block, conn);
+        for (block, conn) in &changeset.blocks {
+            let (extended, _) = self.connect(block.clone(), *conn);
             if chain_extended && !extended {
                 chain_extended = false;
             }
@@ -409,7 +411,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
         self.iter().next().expect("must have chain tip")
     }
 
-    /// Iter checkpoints. Note: this is a temporary solution to provide interop with bdk_wallet
+    /// Iter checkpoints. Note: this is a temporary solution to provide interop with `bdk_wallet`
     pub fn iter_checkpoints(&self) -> CheckPoint {
         let mut blocks = BTreeSet::new();
         blocks.insert(self.genesis_block());
@@ -442,10 +444,11 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
 
     /// Constructor from changeset. Panics if root not present in changeset.
     pub fn from_changeset(changeset: ChangeSet<T>) -> Self {
-        let &(root, _) = changeset
+        let (root, _) = changeset
             .blocks
             .iter()
             .find(|(n, _)| n.block_id().height == 0)
+            .cloned()
             .expect("changeset must include root");
 
         let changeset = ChangeSet {
@@ -456,13 +459,13 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
                 .collect(),
         };
 
-        let mut chain = Self::new(root, BlockGraph::default());
-        chain.apply_changeset(&changeset);
-        chain
+        let mut blk_idx = Self::new(root, BlockGraph::default());
+        blk_idx.apply_changeset(&changeset);
+        blk_idx
     }
 }
 
-/// Get all [`NodeId`]s connecting the terminal node in the graph to the root.
+/// Collect all [`NodeId`]s connecting the terminal node in the graph to the root.
 ///
 /// The root is the last node in the graph whose connected_to block is not found
 /// in this graph.
@@ -478,7 +481,7 @@ fn get_path<T: BlockNode>(graph: &BlockGraph<T>) -> BTreeSet<NodeId> {
     while graph.get(&height).unwrap().len() > 1 {
         height -= 1;
     }
-    let node = graph.get(&height).unwrap()[0];
+    let node = &graph.get(&height).unwrap()[0];
     let id = NodeId::new(height, 0);
     path.insert(id);
     let mut connected_to = node.connected_to();
@@ -547,7 +550,7 @@ impl<T: fmt::Debug> fmt::Display for MergeChainsError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DoesNotConnect { root } => {
-                write!(f, "failed to apply changeset with root {:?}", root)
+                write!(f, "failed to apply changeset with root {root:?}")
             }
             Self::InvalidChain => write!(f, "invalid chain"),
         }
@@ -610,7 +613,7 @@ impl<T> Merge for ChangeSet<T> {
     }
 }
 
-impl<T: BlockNode> ChainOracle for BlockIndex<T> {
+impl<T: fmt::Debug + BlockNode> ChainOracle for BlockIndex<T> {
     type Error = core::convert::Infallible;
 
     fn get_chain_tip(&self) -> Result<BlockId, Self::Error> {
@@ -658,12 +661,12 @@ trait Tree<T> {
 impl<T: BlockNode> Tree<T> for BlockGraph<T> {
     fn root(&self) -> NodeId {
         let index = get_path(self);
-        index.iter().next().cloned().unwrap_or_default()
+        index.iter().next().copied().unwrap_or_default()
     }
 
     fn search(&self, id: &NodeId) -> Option<Node<T>> {
         let nodes = self.get(&id.height())?;
-        nodes.get(id.index()).copied()
+        nodes.get(id.index()).cloned()
     }
 }
 
@@ -1051,6 +1054,7 @@ mod test {
     }
 
     #[test]
+    #[allow(unused)]
     #[ignore = "in develop"]
     fn header_test() {
         use bitcoin::hex::FromHex;
@@ -1065,7 +1069,6 @@ mod test {
         let header_1: Header = bitcoin::consensus::deserialize(&data_1).unwrap();
         let header_2: Header = bitcoin::consensus::deserialize(&data_2).unwrap();
 
-        // dbg!(header);
         let mut idx = BlockIndex::<IndexedHeader>::new((0, header_0), BlockGraph::new());
         // dbg!(&idx);
 
