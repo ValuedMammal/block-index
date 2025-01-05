@@ -87,9 +87,25 @@ impl<T: Clone> IntoIterator for List<T> {
     }
 }
 
-impl<T: Clone> Drop for List<T> {
+// We do this to avoid Drop recursion in Arc. This should not leak memory as long
+// as we have `T: Copy`
+impl<T> Drop for Node<T> {
     fn drop(&mut self) {
-        while self.pop().is_some() {}
+        let mut cur = self.next.take();
+
+        while let Some(ptr) = cur {
+            // If this is the last strong reference, we forget the node instead of
+            // implicitly running its destructor, which could become recursive.
+            match Arc::into_inner(ptr) {
+                Some(mut node) => {
+                    // keep walking the list
+                    cur = node.next.take();
+                    // forget the node
+                    core::mem::forget(node);
+                }
+                None => break,
+            }
+        }
     }
 }
 
