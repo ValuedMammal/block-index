@@ -86,17 +86,15 @@ pub struct BlockIndex<T: BlockNode> {
 
 impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
     /// New
-    pub fn new(root: T, graph: BlockGraph<T>) -> Self {
-        // TODO: error if root block height != 0
+    fn new(root: T, graph: BlockGraph<T>) -> Self {
+        assert_eq!(root.block_id().height, 0, "root must be genesis block");
         let mut idx = Self {
             root,
             graph,
             index: vec![],
             tip: List::new(),
         };
-
         idx.reindex();
-
         idx
     }
 
@@ -193,7 +191,7 @@ impl<T: BlockNode + fmt::Debug> BlockIndex<T> {
     /// 0: genesis
     /// 1: (H, B0)
     /// 2: (H, B1)
-    /// 3: (H, B2), (Ha, B2), ..., (Hn, B2)
+    /// 3: (H, B2), (H<sub>1</sub>, B2), ..., (H<sub>n</sub>, B2)
     pub fn reindex(&mut self) {
         // re-compute the canonical index from the current graph
         self.index = get_path(&self.graph).into_iter().collect();
@@ -634,8 +632,8 @@ impl<T: fmt::Debug + BlockNode> ChainOracle for BlockIndex<T> {
             return Ok(None);
         }
 
-        for cur in self.iter() {
-            if cur.block_id() == block {
+        for node in self.iter() {
+            if node.block_id() == block {
                 return Ok(Some(true));
             }
         }
